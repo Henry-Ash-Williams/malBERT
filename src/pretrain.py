@@ -1,15 +1,17 @@
+import wandb
 import torch
 import datasets
 import pandas as pd 
 from datasets import DatasetDict 
 from transformers import DataCollatorForLanguageModeling
-from transformers import Trainer, TrainingArguments
+from transformers import Trainer, TrainingArguments, TrainerCallback
 from transformers.integrations import WandbCallback
 from transformers import RobertaConfig, RobertaTokenizerFast, RobertaForMaskedLM
 
 import os 
 import pickle
 import argparse
+import datetime
 
 # Set up weights & biases 
 os.environ["WANDB_PROJECT"] = "malbert-hf"
@@ -56,23 +58,51 @@ class LogPredictionsCallback(WandbCallback):
         table = self._wandb.Table(dataframe=df)
         self._wandb.log({"sample": table})
 
+class AbortIfTooSlow(TrainerCallback):
+    def __init__(self, total_steps: int, min_fraction: float = 0.1, max_time_hours: int = 1):
+        self.total_steps = total_steps 
+        self.min_steps = int(total_steps * min_fraction)
+        self.max_time = datetime.timedelta(hours=max_time_hours)
+        self.start_time = None 
+        
+    def on_train_begin(self, args, state, control, **kwargs):
+        self.start_time = datetime.datetime.now() 
+        
+    def on_step_end(self, args, state, control, **kwargs):
+        elapsed = datetime.datetime.now() - self.start_time 
+        
+        if elapsed > self.max_time and state.global_step < self.min_steps: 
+            print(f"‼️ Training too slow: only {state.global_step} out of {self.min_steps}", 
+                  f"after {elapsed} seconds. Aborting... ")
+
+            if wandb.run is not None:
+                wandb.run.summary["status"] = "FAILED"
+                wandb.run.summary["failure_reason"] = "Training was too slow, aborted"
+                wandb.run.finish(exit_code=1)
+            
+            control.should_training_stop = True
+
+        
+
 def get_args():
     parser = argparse.ArgumentParser(description="Configuration for training/evaluating the model.")
 
-    # Model architecture
+    # Not really necessary tbh 
     parser.add_argument("--max_length", type=int, default=10,
                         help="Max number of tokens in an instruction")
     parser.add_argument("--vocab_size", type=int, default=10000,
                         help="Number of tokens")
-    parser.add_argument("--hidden_size", type=int, default=768,
-                        help="Size of hidden layers")
+    
+    # Model architecture
+    parser.add_argument("--hidden_size_factor", type=int, default=64,
+                        help="Multiplier for number of attention heads to get hidden size")
     parser.add_argument("--num_hidden", type=int, default=12,
                         help="Number of hidden layers")
     parser.add_argument("--num_attention", type=int, default=12,
                         help="Number of attention heads")
-    parser.add_argument("--intermediate_size", type=int, default=3072,
-                        help="Size of intermediate layers")
-    parser.add_argument("--hidden_act", type=str, default="gelu",
+    parser.add_argument("--intermediate_size_factor", type=int, default=4,
+                        help="Multiplier for size of hidden layers to get intermediate ")
+    parser.add_argument("--hidden_act", type=str, default="gelu", choices=["gelu", "relu", "silu", "gelu_new"],
                         help="Activation function used in the hidden layers")
     parser.add_argument("--hidden_dropout_prob", type=float, default=0.1,
                         help="Dropout probability in hidden layers")
@@ -86,9 +116,9 @@ def get_args():
     # Training
     parser.add_argument("--epochs", type=int, default=1,
                         help="Number of training epochs")
-    parser.add_argument("--batch_size", type=int, default=256,
+    parser.add_argument("--batch_size", type=int, default=2048,
                         help="Training batch size")
-    parser.add_argument("--split_size", type=float, default=1.0,
+    parser.add_argument("--split_size", type=float, default=1.0 - 1e-5,
                         help="Portion of training and testing data to use")
 
     # Paths
@@ -102,7 +132,14 @@ def get_args():
                         default="/its/home/hw452/programming/MalBERT/MalBERT",
                         help="Path to tokenizer")
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.hidden_size = args.num_attention * args.hidden_size_factor 
+    del args.hidden_size_factor 
+
+    args.intermediate_size = args.hidden_size * args.intermediate_size_factor 
+    del args.intermediate_size_factor 
+    
+    return args 
 
 if __name__ == "__main__":
     args = get_args()
@@ -159,7 +196,6 @@ if __name__ == "__main__":
     model = RobertaForMaskedLM(config=config)    
     print(" done")
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=True, mlm_probability=0.15)
-    callback = LogPredictionsCallback(args.eval_data_path, tokenizer)
 
 
     trainer = Trainer(
@@ -168,9 +204,12 @@ if __name__ == "__main__":
         processing_class=tokenizer,
         data_collator=data_collator,
         train_dataset=dataset['train'], 
-        eval_dataset=dataset['test']
+        eval_dataset=dataset['test'],
+        callbacks=[
+            LogPredictionsCallback(args.eval_data_path, tokenizer),
+            AbortIfTooSlow((len(dataset['train']) // args.batch_size) * args.epochs, min_fraction=1.0, max_time_hours=0.007)
+        ]
     )
 
-    trainer.add_callback(callback)
     trainer.train()
     trainer.save_model(args.model_path)
