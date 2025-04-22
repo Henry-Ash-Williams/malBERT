@@ -12,6 +12,7 @@ wheels/
 # Dataset 
 data/*
 !data/README.md 
+!data/tokenized.tar.xz
 
 # wandb
 wandb/
@@ -21,3 +22,5 @@ MalBERT/
 
 # Artifacts 
 artifacts/ 
+
+.vscode/

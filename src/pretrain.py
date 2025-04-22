@@ -1,7 +1,7 @@
 import torch
 import datasets
 import pandas as pd 
-from tqdm import TqdmWarning
+from datasets import DatasetDict 
 from transformers import DataCollatorForLanguageModeling
 from transformers import Trainer, TrainingArguments
 from transformers.integrations import WandbCallback
@@ -9,13 +9,7 @@ from transformers import RobertaConfig, RobertaTokenizerFast, RobertaForMaskedLM
 
 import os 
 import pickle
-import warnings
 import argparse
-import pprint
-
-# Hide all warnings
-warnings.filterwarnings('ignore')
-warnings.filterwarnings('ignore', category=TqdmWarning)
 
 # Set up weights & biases 
 os.environ["WANDB_PROJECT"] = "malbert-hf"
@@ -94,16 +88,18 @@ def get_args():
                         help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=256,
                         help="Training batch size")
+    parser.add_argument("--split_size", type=float, default=1.0,
+                        help="Portion of training and testing data to use")
 
     # Paths
     parser.add_argument("--eval_data_path", type=str,
-                        default="/Users/henrywilliams/Documents/programming/python/ai/malbert-test/data.pickle",
+                        default="/its/home/hw452/programming/MalBERT/data.pickle",
                         help="Evaluation subset")
     parser.add_argument("--dataset_path", type=str,
-                        default="/Users/henrywilliams/Documents/programming/python/ai/malbert-test/data/tokenized",
+                        default="/its/home/hw452/programming/MalBERT/data/tokenized",
                         help="Tokenized dataset path")
     parser.add_argument("--model_path", type=str,
-                        default="/Users/henrywilliams/Documents/programming/python/ai/malbert-test/MalBERT",
+                        default="/its/home/hw452/programming/MalBERT/MalBERT",
                         help="Path to tokenizer")
 
     return parser.parse_args()
@@ -112,15 +108,43 @@ if __name__ == "__main__":
     args = get_args()
     args_dict = vars(args)
 
+    train_args = TrainingArguments(
+        output_dir=args.model_path,
+        overwrite_output_dir=True,
+        num_train_epochs=args.epochs,
+        per_device_train_batch_size=args.batch_size, 
+        per_device_eval_batch_size=args.batch_size,
+        logging_steps=100,
+        save_strategy="epoch",
+        prediction_loss_only=True,  
+        report_to="wandb",
+        run_name="malbert",
+        eval_strategy="steps",
+        eval_steps=10000,
+    )
+
     print("Configuration:")
     [print(f"  {k:<30}  {v}") for k, v in args_dict.items()]
 
+    print("Loading data...", end="")
     dataset = datasets.load_from_disk("data/tokenized")
-    tokenizer = RobertaTokenizerFast.from_pretrained(args.model_path)
+    train_subset = dataset['train'].train_test_split(test_size=1 - args.split_size, shuffle=True)['train']
+    test_subset = dataset['test'].train_test_split(test_size=args.split_size, shuffle=True)['test']
+    dataset = DatasetDict({
+        'train': train_subset,
+        'test': test_subset,
+    })
+    print(" done.")
+    print(f"Dataset has {len(dataset['train'])} samples in train, {len(dataset['test'])} in test")
 
+    print("Loading tokenizer...", end="")
+    tokenizer = RobertaTokenizerFast.from_pretrained(args.model_path)
+    print(" done")
+
+    print("Loading model...", end="")
     config = RobertaConfig(
         vocab_size=args.vocab_size, 
-        max_position_embeddings=args.max_length, 
+        max_position_embeddings=args.max_length + 2, 
         num_attention_heads=args.num_attention,
         num_hidden_layers=args.num_hidden,
         type_vocab_size=1,
@@ -133,19 +157,10 @@ if __name__ == "__main__":
         layer_norm_eps=args.layer_norm_eps,
     )
     model = RobertaForMaskedLM(config=config)    
+    print(" done")
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=True, mlm_probability=0.15)
     callback = LogPredictionsCallback(args.eval_data_path, tokenizer)
 
-    train_args = TrainingArguments(
-        output_dir=args.model_path,
-        overwrite_output_dir=True,
-        num_train_epochs=args.epochs,
-        per_device_train_batch_size=args.batch_size, 
-        save_steps=10_000, 
-        save_total_limit=2,
-        prediction_loss_only=True,  
-        report_to="wandb",
-    )
 
     trainer = Trainer(
         model=model,
