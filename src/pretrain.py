@@ -12,6 +12,7 @@ import os
 import pickle
 import argparse
 import datetime
+from collections import defaultdict
 
 # Set up weights & biases 
 os.environ["WANDB_PROJECT"] = "malbert-hf"
@@ -81,6 +82,28 @@ class AbortIfTooSlow(TrainerCallback):
                 wandb.run.finish(exit_code=1)
             
             control.should_training_stop = True
+
+def handle_sample(sample):
+    texts = sample['text']
+    labels = sample['label']
+    
+    flattened = defaultdict(list)
+
+    for text, label in zip(texts, labels):
+        tokenized = tokenizer(
+            text,
+            padding='max_length',
+            max_length=args.max_length,
+            return_overflowing_tokens=True,
+            truncation=True
+        )
+
+        for i in range(len(tokenized['input_ids'])):
+            for k in tokenized:
+                flattened[k].append(tokenized[k][i])
+            flattened['label'].append(label)
+
+    return dict(flattened)
 
         
 
@@ -164,13 +187,14 @@ if __name__ == "__main__":
     [print(f"  {k:<30}  {v}") for k, v in args_dict.items()]
 
     print("Loading data...", end="")
-    dataset = datasets.load_from_disk("data/tokenized")
-    train_subset = dataset['train'].train_test_split(test_size=1 - args.split_size, shuffle=True)['train']
-    test_subset = dataset['test'].train_test_split(test_size=args.split_size, shuffle=True)['test']
-    dataset = DatasetDict({
-        'train': train_subset,
-        'test': test_subset,
-    })
+    dataset = datasets.load_from_disk("data/raw")
+    processed_dataset = dataset.map(
+        handle_sample,
+        remove_columns=dataset['test'].column_names,
+        batch_size=64,
+        batched=True,
+        num_proc=8,
+    )
     print(" done.")
     print(f"Dataset has {len(dataset['train'])} samples in train, {len(dataset['test'])} in test")
 
