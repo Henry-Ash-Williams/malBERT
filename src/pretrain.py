@@ -2,14 +2,12 @@ import wandb
 import torch
 import datasets
 import pandas as pd 
-from datasets import DatasetDict 
 from transformers import DataCollatorForLanguageModeling
 from transformers import Trainer, TrainingArguments, TrainerCallback
 from transformers.integrations import WandbCallback
-from transformers import RobertaConfig, RobertaTokenizerFast, RobertaForMaskedLM
+from transformers import RobertaConfig, PreTrainedTokenizerFast, RobertaForMaskedLM
 
 import os 
-import pickle
 import argparse
 import datetime
 from collections import defaultdict
@@ -20,42 +18,25 @@ os.environ["WANDB_LOG_MODEL"] = "checkpoint"
 
 # Weights & Biases callback to log evaluation samples
 class LogPredictionsCallback(WandbCallback):
-    def __init__(self, data_path, tokenizer):
+    def __init__(self, data_collator, token_ids, tokenizer):
         super().__init__()
+        self.data_collator = data_collator 
+        self.token_ids = token_ids 
         self.tokenizer = tokenizer
-        with open(data_path, 'rb') as data_file: 
-            self.data = pickle.load(data_file)
         
     def on_train_end(self, args, state, control, **kwargs):
-        model = kwargs['model']
-        device = model.device 
+        X = self.data_collator(torch.tensor(self.token_ids['input_ids']))
+        preds = trainer.predict(X['input_ids'])
         
-        model.eval()
-        with torch.no_grad():
-            output = model(
-                input_ids=torch.tensor(self.data['input_ids']).to(device),
-                attention_mask=torch.tensor(self.data['attention_mask']).to(device),
-                labels=torch.tensor(self.data['labels']).to(device)
-            )
+        Y_hat = tokenizer.batch_decode(preds.predictions.argmax(-1))
+        Y = tokenizer.batch_decode(self.token_ids['input_ids'])
 
-        self.data['input_ids'] = torch.tensor(self.data['input_ids']).detach()
-        self.data['attention_mask'] = torch.tensor(self.data['attention_mask']).detach()
-        self.data['labels'] = torch.tensor(self.data['labels']).detach()
+        df = pd.DataFrame(data={
+            "Input": tokenizer.batch_decode(X['input_ids']),
+            "Predicted": Y_hat,
+            "Actual": Y,
+        })
 
-        mask_pos = torch.where(self.data['input_ids'] == self.tokenizer.mask_token_id)
-
-        input = torch.clone(self.data['input_ids'])
-        actual = torch.clone(self.data['input_ids'])
-        predicted = torch.clone(self.data['input_ids'])
-
-        actual[actual == self.tokenizer.mask_token_id] = self.data['labels'][mask_pos[0], mask_pos[1]]
-        predicted[predicted == self.tokenizer.mask_token_id] = output.logits[mask_pos[0], mask_pos[1], :].argmax(dim=-1).cpu()
-
-        x = [self.tokenizer.decode(xi[~torch.isin(xi, torch.tensor([0, 1, 2, 3]))]) for xi in input]
-        y = self.tokenizer.batch_decode(actual, skip_special_tokens=True)
-        y_hat = self.tokenizer.batch_decode(predicted, skip_special_tokens=True)
-
-        df = pd.DataFrame({"Input": x, "Actual": y, "Predicted": y_hat})
         table = self._wandb.Table(dataframe=df)
         self._wandb.log({"sample": table})
 
@@ -113,7 +94,7 @@ def get_args():
     # Not really necessary tbh 
     parser.add_argument("--max_length", type=int, default=10,
                         help="Max number of tokens in an instruction")
-    parser.add_argument("--vocab_size", type=int, default=10000,
+    parser.add_argument("--vocab_size", type=int, default=1293,
                         help="Number of tokens")
     
     # Model architecture
@@ -145,14 +126,11 @@ def get_args():
                         help="Portion of training and testing data to use")
 
     # Paths
-    parser.add_argument("--eval_data_path", type=str,
-                        default="/its/home/hw452/programming/MalBERT/data.pickle",
-                        help="Evaluation subset")
     parser.add_argument("--dataset_path", type=str,
-                        default="/its/home/hw452/programming/MalBERT/data/tokenized",
+                        default="/Users/henrywilliams/Documents/programming/python/ai/malbert-test/data",
                         help="Tokenized dataset path")
     parser.add_argument("--model_path", type=str,
-                        default="/its/home/hw452/programming/MalBERT/MalBERT",
+                        default="/Users/henrywilliams/Documents/programming/python/ai/malbert-test/MalBERTa",
                         help="Path to tokenizer")
 
     args = parser.parse_args()
@@ -176,7 +154,7 @@ if __name__ == "__main__":
         per_device_eval_batch_size=args.batch_size,
         logging_steps=100,
         save_strategy="epoch",
-        prediction_loss_only=True,  
+        # prediction_loss_only=True,  
         report_to="wandb",
         run_name="malbert",
         eval_strategy="steps",
@@ -185,6 +163,10 @@ if __name__ == "__main__":
 
     print("Configuration:")
     [print(f"  {k:<30}  {v}") for k, v in args_dict.items()]
+
+    print("Loading tokenizer...", end="")
+    tokenizer = PreTrainedTokenizerFast.from_pretrained(args.model_path)
+    print(" done")
 
     print("Loading data...", end="")
     dataset = datasets.load_from_disk("data/raw")
@@ -198,9 +180,6 @@ if __name__ == "__main__":
     print(" done.")
     print(f"Dataset has {len(dataset['train'])} samples in train, {len(dataset['test'])} in test")
 
-    print("Loading tokenizer...", end="")
-    tokenizer = RobertaTokenizerFast.from_pretrained(args.model_path)
-    print(" done")
 
     print("Loading model...", end="")
     config = RobertaConfig(
@@ -222,15 +201,19 @@ if __name__ == "__main__":
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=True, mlm_probability=0.15)
 
 
+    train_ds = processed_dataset['train'].remove_columns('label')
+    test_ds = processed_dataset['test'].remove_columns('label')
+    pred_data = test_ds.select(range(10))
+
     trainer = Trainer(
         model=model,
         args=train_args, 
         processing_class=tokenizer,
         data_collator=data_collator,
-        train_dataset=dataset['train'], 
-        eval_dataset=dataset['test'],
+        train_dataset=train_ds, 
+        eval_dataset=test_ds,
         callbacks=[
-            LogPredictionsCallback(args.eval_data_path, tokenizer),
+            LogPredictionsCallback(data_collator, pred_data, tokenizer),
             AbortIfTooSlow((len(dataset['train']) // args.batch_size) * args.epochs, min_fraction=1.0, max_time_hours=0.007)
         ]
     )
