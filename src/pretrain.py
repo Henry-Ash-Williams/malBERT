@@ -2,15 +2,18 @@ import wandb
 import torch
 import datasets
 import pandas as pd 
+from transformers.integrations import WandbCallback
 from transformers import DataCollatorForLanguageModeling
 from transformers import Trainer, TrainingArguments, TrainerCallback
-from transformers.integrations import WandbCallback
 from transformers import RobertaConfig, PreTrainedTokenizerFast, RobertaForMaskedLM
 
 import os 
+import random
 import argparse
 import datetime
+from string import hexdigits 
 from collections import defaultdict
+
 
 # Set up weights & biases 
 os.environ["WANDB_PROJECT"] = "malbert-hf"
@@ -46,23 +49,28 @@ class AbortIfTooSlow(TrainerCallback):
         self.min_steps = int(total_steps * min_fraction)
         self.max_time = datetime.timedelta(hours=max_time_hours)
         self.start_time = None 
+        self._train_time = datetime.timedelta()
+        self._last_step_time = None
         
     def on_train_begin(self, args, state, control, **kwargs):
-        self.start_time = datetime.datetime.now() 
+        self._train_time = datetime.timedelta() 
+        self._last_step_time = datetime.datetime.now() 
+
+    def on_step_begin(self, args, state, control, **kwargs):
+        self._last_step_time = datetime.datetime.now() 
         
     def on_step_end(self, args, state, control, **kwargs):
-        elapsed = datetime.datetime.now() - self.start_time 
-        
-        if elapsed > self.max_time and state.global_step < self.min_steps: 
-            print(f"‼️ Training too slow: only {state.global_step} out of {self.min_steps}", 
-                  f"after {elapsed} seconds. Aborting... ")
+        now = datetime.datetime.now() 
 
-            if wandb.run is not None:
-                wandb.run.summary["status"] = "FAILED"
-                wandb.run.summary["failure_reason"] = "Training was too slow, aborted"
-                wandb.run.finish(exit_code=1)
+        if self._last_step_time is not None: 
+            self._train_time += now - self._last_step_time 
             
-            control.should_training_stop = True
+        if self._train_time > self.max_time and state.global_step < self.min_steps: 
+            print(f"‼️ Training too slow: only {state.global_step} out of {self.min_steps}", 
+                  f"after {self._train_time} seconds. Aborting... ")
+
+            raise RuntimeError("Training took too long")
+
 
 def handle_sample(sample):
     texts = sample['text']
@@ -91,8 +99,7 @@ def handle_sample(sample):
 def get_args():
     parser = argparse.ArgumentParser(description="Configuration for training/evaluating the model.")
 
-    # Not really necessary tbh 
-    parser.add_argument("--max_length", type=int, default=10,
+    parser.add_argument("--max_length", type=int, default=64,
                         help="Max number of tokens in an instruction")
     parser.add_argument("--vocab_size", type=int, default=1293,
                         help="Number of tokens")
@@ -120,17 +127,15 @@ def get_args():
     # Training
     parser.add_argument("--epochs", type=int, default=1,
                         help="Number of training epochs")
-    parser.add_argument("--batch_size", type=int, default=2048,
+    parser.add_argument("--batch_size", type=int, default=256,
                         help="Training batch size")
-    parser.add_argument("--split_size", type=float, default=1.0 - 1e-5,
-                        help="Portion of training and testing data to use")
 
     # Paths
     parser.add_argument("--dataset_path", type=str,
-                        default="/Users/henrywilliams/Documents/programming/python/ai/malbert-test/data",
+                        default="/its/home/hw452/programming/MalBERT/data/raw",
                         help="Tokenized dataset path")
     parser.add_argument("--model_path", type=str,
-                        default="/Users/henrywilliams/Documents/programming/python/ai/malbert-test/MalBERTa",
+                        default="/its/home/hw452/programming/MalBERT/MalBERTa",
                         help="Path to tokenizer")
 
     args = parser.parse_args()
@@ -154,11 +159,9 @@ if __name__ == "__main__":
         per_device_eval_batch_size=args.batch_size,
         logging_steps=100,
         save_strategy="epoch",
-        # prediction_loss_only=True,  
         report_to="wandb",
-        run_name="malbert",
-        eval_strategy="steps",
-        eval_steps=10000,
+        run_name=f"malbert-{''.join([random.choice(hexdigits) for _ in range(10)])}",
+        eval_strategy="epoch",
     )
 
     print("Configuration:")
@@ -214,7 +217,7 @@ if __name__ == "__main__":
         eval_dataset=test_ds,
         callbacks=[
             LogPredictionsCallback(data_collator, pred_data, tokenizer),
-            AbortIfTooSlow((len(dataset['train']) // args.batch_size) * args.epochs, min_fraction=1.0, max_time_hours=0.007)
+            AbortIfTooSlow((len(dataset['train']) // args.batch_size) * args.epochs, min_fraction=0.1, max_time_hours=1)
         ]
     )
 
