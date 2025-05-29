@@ -19,6 +19,7 @@ wandb/
 
 # Saved model & tokenizer
 MalBERT/
+MalBERTa*/
 
 # Artifacts 
 artifacts/ 

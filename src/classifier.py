@@ -2,10 +2,13 @@ import wandb
 import torch
 import datasets
 import pandas as pd 
+from datasets import disable_caching
 from transformers.integrations import WandbCallback
 from transformers import DataCollatorForLanguageModeling
 from transformers import Trainer, TrainingArguments, TrainerCallback
-from transformers import RobertaConfig, PreTrainedTokenizerFast, RobertaForMaskedLM
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from transformers import RobertaConfig, RobertaForSequenceClassification, RobertaForMaskedLM
+from transformers import PreTrainedTokenizerFast
 
 import os 
 import random
@@ -16,32 +19,9 @@ from collections import defaultdict
 
 
 # Set up weights & biases 
-os.environ["WANDB_PROJECT"] = "malbert-hf"
-os.environ["WANDB_LOG_MODEL"] = "checkpoint"
-
-# Weights & Biases callback to log evaluation samples
-class LogPredictionsCallback(WandbCallback):
-    def __init__(self, data_collator, token_ids, tokenizer):
-        super().__init__()
-        self.data_collator = data_collator 
-        self.token_ids = token_ids 
-        self.tokenizer = tokenizer
-        
-    def on_train_end(self, args, state, control, **kwargs):
-        X = self.data_collator(torch.tensor(self.token_ids['input_ids']))
-        preds = trainer.predict(X['input_ids'])
-        
-        Y_hat = tokenizer.batch_decode(preds.predictions.argmax(-1))
-        Y = tokenizer.batch_decode(self.token_ids['input_ids'])
-
-        df = pd.DataFrame(data={
-            "Input": tokenizer.batch_decode(X['input_ids']),
-            "Predicted": Y_hat,
-            "Actual": Y,
-        })
-
-        table = self._wandb.Table(dataframe=df)
-        self._wandb.log({"sample": table})
+os.environ["WANDB_PROJECT"] = "opcode-malberta"
+os.environ["WANDB_LOG_MODEL"] = "end"
+# os.environ["WANDB_WATCH"] = "all"
 
 class AbortIfTooSlow(TrainerCallback):
     def __init__(self, total_steps: int, min_fraction: float = 0.1, max_time_hours: int = 1):
@@ -93,7 +73,6 @@ def handle_sample(sample):
             flattened['label'].append(label)
 
     return dict(flattened)
-
         
 
 def get_args():
@@ -129,14 +108,17 @@ def get_args():
                         help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=256,
                         help="Training batch size")
+    parser.add_argument("--do-pretrain", action="store_true", default=False)
 
     # Paths
     parser.add_argument("--dataset_path", type=str,
                         default="/its/home/hw452/programming/MalBERT/data/raw",
                         help="Tokenized dataset path")
-    parser.add_argument("--model_path", type=str,
+    parser.add_argument("--tokenizer_path", type=str,
                         default="/its/home/hw452/programming/MalBERT/MalBERTa",
                         help="Path to tokenizer")
+    parser.add_argument("--output_path", type=str, 
+                        help="Where to save the model")
 
     args = parser.parse_args()
     args.hidden_size = args.num_attention * args.hidden_size_factor 
@@ -147,57 +129,7 @@ def get_args():
     
     return args 
 
-if __name__ == "__main__":
-    args = get_args()
-    args_dict = vars(args)
-
-    train_args = TrainingArguments(
-        output_dir=args.model_path,
-        overwrite_output_dir=True,
-        num_train_epochs=args.epochs,
-        per_device_train_batch_size=args.batch_size, 
-        per_device_eval_batch_size=args.batch_size,
-        logging_steps=100,
-        save_strategy="epoch",
-        report_to="wandb",
-        run_name=f"malbert-{''.join([random.choice(hexdigits) for _ in range(10)])}",
-        eval_strategy="epoch",
-    )
-
-    print("Configuration:")
-    [print(f"  {k:<30}  {v}") for k, v in args_dict.items()]
-
-    print("Loading tokenizer...", end="")
-    tokenizer = PreTrainedTokenizerFast.from_pretrained(args.model_path)
-    print(" done")
-
-    print("Loading data...", end="")
-    dataset = datasets.load_from_disk("data/raw")
-    processed_dataset = dataset.map(
-        handle_sample,
-        remove_columns=dataset['test'].column_names,
-        batch_size=64,
-        batched=True,
-        num_proc=8,
-    )
-    print(" done.")
-    print(f"Dataset has {len(dataset['train'])} samples in train, {len(dataset['test'])} in test")
-
-
-    train_args = TrainingArguments(
-        output_dir=args.model_path,
-        overwrite_output_dir=True,
-        num_train_epochs=args.epochs,
-        per_device_train_batch_size=args.batch_size, 
-        per_device_eval_batch_size=args.batch_size,
-        logging_steps=100,
-        save_strategy="epoch",
-        report_to="wandb",
-        run_name="malbert",
-        eval_strategy="steps",
-        eval_steps=(len(dataset['train']) // args.batch_size) * 5,
-    )
-
+def pretrain(dataset, tokenizer, args):
     print("Loading model...", end="")
     config = RobertaConfig(
         vocab_size=args.vocab_size, 
@@ -217,10 +149,21 @@ if __name__ == "__main__":
     print(" done")
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=True, mlm_probability=0.15)
 
+    train_ds = dataset['train'].remove_columns('label')
+    test_ds = dataset['test'].remove_columns('label')
 
-    train_ds = processed_dataset['train'].remove_columns('label')
-    test_ds = processed_dataset['test'].remove_columns('label')
-    pred_data = test_ds.select(range(10))
+    train_args = TrainingArguments(
+        output_dir=args.output_path,
+        overwrite_output_dir=True,
+        num_train_epochs=args.epochs,
+        per_device_train_batch_size=args.batch_size, 
+        per_device_eval_batch_size=args.batch_size,
+        save_total_limit=1,
+        logging_steps=100,
+        save_strategy="no",
+        report_to="none",
+        eval_strategy="epoch",
+    )
 
     trainer = Trainer(
         model=model,
@@ -230,10 +173,101 @@ if __name__ == "__main__":
         train_dataset=train_ds, 
         eval_dataset=test_ds,
         callbacks=[
-            LogPredictionsCallback(data_collator, pred_data, tokenizer),
             AbortIfTooSlow((len(dataset['train']) // args.batch_size) * args.epochs, min_fraction=0.1, max_time_hours=1)
         ]
     )
 
     trainer.train()
-    trainer.save_model(args.model_path)
+    trainer.save_model(args.output_path)
+
+
+def compute_metrics(eval_pred):
+    logits, labels = eval_pred
+    predictions = logits.argmax(axis=-1)
+    return {
+        "accuracy": accuracy_score(labels, predictions),
+        "precision": precision_score(labels, predictions, average="weighted", zero_division=0),
+        "recall": recall_score(labels, predictions, average="weighted", zero_division=0),
+        "f1": f1_score(labels, predictions, average="weighted", zero_division=0),
+    }
+
+if __name__ == "__main__":
+    disable_caching()
+    args = get_args()
+    args_dict = vars(args)
+
+
+    print("Configuration:")
+    [print(f"  {k:<30}  {v}") for k, v in args_dict.items()]
+
+    print("Loading tokenizer...", end="")
+    tokenizer = PreTrainedTokenizerFast.from_pretrained(args.tokenizer_path)
+    print(" done")
+
+    print("Loading data...", end="")
+    dataset = datasets.load_from_disk("data/raw")
+
+    dataset["test"] = dataset["test"].shuffle().select(range(int(len(dataset["test"]) * 0.1)))
+    dataset["train"] = dataset["train"].shuffle().select(range(int(len(dataset["train"]) * 0.1)))
+
+    processed_dataset = dataset.map(
+        handle_sample,
+        remove_columns=dataset['test'].column_names,
+        batch_size=64,
+        batched=True,
+        num_proc=8,
+    )
+    print(" done.")
+    print(f"Dataset has {len(processed_dataset['train'])} samples in train, {len(processed_dataset['test'])} in test")
+
+    if args.do_pretrain:
+        pretrain(processed_dataset, tokenizer, args) 
+        classifier_model = RobertaForSequenceClassification.from_pretrained(args.output_path)
+    else: 
+        config = RobertaConfig(
+            vocab_size=args.vocab_size, 
+            max_position_embeddings=args.max_length + 2, 
+            num_attention_heads=args.num_attention,
+            num_hidden_layers=args.num_hidden,
+            type_vocab_size=1,
+            hidden_size=args.hidden_size,
+            intermediate_size=args.intermediate_size,
+            hidden_act=args.hidden_act,
+            hidden_dropout_prob=args.hidden_dropout_prob, 
+            attention_probs_dropout_prob=args.attention_dropout_prob,
+            initializer_range=args.init_range, 
+            layer_norm_eps=args.layer_norm_eps,
+        )
+        classifier_model = RobertaForSequenceClassification(config)
+
+
+    wandb.init(
+        project="opcode-malberta",
+        name=f"malbert-classifier-{''.join([random.choice(hexdigits) for _ in range(10)])}",
+        tags=['pretrained'] if args.do_pretrain else None
+    )
+    train_args = TrainingArguments(
+        output_dir=args.output_path,
+        overwrite_output_dir=True,
+        save_total_limit=1,
+        num_train_epochs=args.epochs,
+        per_device_train_batch_size=args.batch_size, 
+        per_device_eval_batch_size=args.batch_size * 2, 
+        save_strategy="epoch",
+        eval_strategy="epoch",
+        logging_steps=100,
+        report_to="wandb",
+    )
+
+    trainer = Trainer(
+        model=classifier_model,
+        args=train_args, 
+        processing_class=tokenizer,
+        train_dataset=processed_dataset['train'],
+        eval_dataset=processed_dataset['test'],
+        compute_metrics=compute_metrics,
+    )
+
+    trainer.train() 
+    trainer.save_model(args.output_path)
+        
