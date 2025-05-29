@@ -146,20 +146,6 @@ if __name__ == "__main__":
     args = get_args()
     args_dict = vars(args)
 
-    train_args = TrainingArguments(
-        output_dir=args.model_path,
-        overwrite_output_dir=True,
-        num_train_epochs=args.epochs,
-        per_device_train_batch_size=args.batch_size, 
-        per_device_eval_batch_size=args.batch_size,
-        logging_steps=100,
-        save_strategy="epoch",
-        # prediction_loss_only=True,  
-        report_to="wandb",
-        run_name="malbert",
-        eval_strategy="steps",
-        eval_steps=10000,
-    )
 
     print("Configuration:")
     [print(f"  {k:<30}  {v}") for k, v in args_dict.items()]
@@ -180,6 +166,20 @@ if __name__ == "__main__":
     print(" done.")
     print(f"Dataset has {len(dataset['train'])} samples in train, {len(dataset['test'])} in test")
 
+
+    train_args = TrainingArguments(
+        output_dir=args.model_path,
+        overwrite_output_dir=True,
+        num_train_epochs=args.epochs,
+        per_device_train_batch_size=args.batch_size, 
+        per_device_eval_batch_size=args.batch_size,
+        logging_steps=100,
+        save_strategy="epoch",
+        report_to="wandb",
+        run_name="malbert",
+        eval_strategy="steps",
+        eval_steps=(len(dataset['train']) // args.batch_size) * 5,
+    )
 
     print("Loading model...", end="")
     config = RobertaConfig(
@@ -214,7 +214,7 @@ if __name__ == "__main__":
         eval_dataset=test_ds,
         callbacks=[
             LogPredictionsCallback(data_collator, pred_data, tokenizer),
-            AbortIfTooSlow((len(dataset['train']) // args.batch_size) * args.epochs, min_fraction=1.0, max_time_hours=0.007)
+            AbortIfTooSlow((len(dataset['train']) // args.batch_size) * args.epochs, min_fraction=0.1, max_time_hours=1)
         ]
     )
 
