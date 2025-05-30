@@ -23,6 +23,8 @@ os.environ["WANDB_PROJECT"] = "opcode-malberta"
 os.environ["WANDB_LOG_MODEL"] = "end"
 # os.environ["WANDB_WATCH"] = "all"
 
+pretrain_eval_loss = None
+
 class AbortIfTooSlow(TrainerCallback):
     def __init__(self, total_steps: int, min_fraction: float = 0.1, max_time_hours: int = 1):
         self.total_steps = total_steps 
@@ -108,7 +110,8 @@ def get_args():
                         help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=256,
                         help="Training batch size")
-    parser.add_argument("--do-pretrain", action="store_true", default=False)
+    parser.add_argument("--do_pretrain", action="store_true", default=False)
+    parser.add_argument("--notes", default=None, type=str)
 
     # Paths
     parser.add_argument("--dataset_path", type=str,
@@ -205,7 +208,7 @@ if __name__ == "__main__":
     print(" done")
 
     print("Loading data...", end="")
-    dataset = datasets.load_from_disk("data/raw")
+    dataset = datasets.load_from_disk(args.dataset_path)
 
     dataset["test"] = dataset["test"].shuffle().select(range(int(len(dataset["test"]) * 0.1)))
     dataset["train"] = dataset["train"].shuffle().select(range(int(len(dataset["train"]) * 0.1)))
@@ -244,7 +247,8 @@ if __name__ == "__main__":
     wandb.init(
         project="opcode-malberta",
         name=f"malbert-classifier-{''.join([random.choice(hexdigits) for _ in range(10)])}",
-        tags=['pretrained'] if args.do_pretrain else None
+        tags=['pretrained'] if args.do_pretrain else None,
+        notes=args.notes,
     )
     train_args = TrainingArguments(
         output_dir=args.output_path,
