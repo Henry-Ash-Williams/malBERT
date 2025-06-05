@@ -1,8 +1,8 @@
-# MalBERT
+# MalBERTa
 
 RoBERTa for static malware detection. Part of my masters thesis at the University of Sussex. 
 
-Pre-trains RoBERTa using MaskedLM on disassembled x86 instructions, then fine-tunes on a downstream classification problem. 
+Pre-trains RoBERTa using MaskedLM on x86 opcode sequences, then trains a sequence classifier
 
 ## Setup 
 
@@ -30,11 +30,15 @@ $ uv sync
 ```
 .
 ├── README.md
+├── MalBERTa            # Tokenizer 
+├── notebooks           # Jupyter notebooks for data analysis and testing 
+├── src                 # Python scripts 
+│   ├── pretrain.py     # Pretrainer
+│   └── classifier.py   # Classifier 
 ├── data                # Dataset 
-│   └── README.md       
-├── data.pickle         # Evaluation data
-├── pretrain.ipynb      # Pre-training
+│   └── raw.zip       
 ├── pyproject.toml      # Project spec
+├── malberta-runs.csv   # Run history 
 └── uv.lock             # UV metadata
 ```
 
