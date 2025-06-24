@@ -210,8 +210,8 @@ if __name__ == "__main__":
     print("Loading data...", end="")
     dataset = datasets.load_from_disk(args.dataset_path)
 
-    dataset["test"] = dataset["test"].shuffle().select(range(int(len(dataset["test"]) * 0.1)))
-    dataset["train"] = dataset["train"].shuffle().select(range(int(len(dataset["train"]) * 0.1)))
+    dataset["test"] = dataset["test"].shuffle().select(range(int(len(dataset["test"]) * 0.01)))
+    dataset["train"] = dataset["train"].shuffle().select(range(int(len(dataset["train"]) * 0.01)))
 
     processed_dataset = dataset.map(
         handle_sample,

@@ -9,6 +9,8 @@ dependencies = [
     "datasets>=3.5.0",
     "evaluate>=0.4.3",
     "matplotlib>=3.10.3",
+    "nbformat>=4.2.0",
+    "plotly>=6.1.2",
     "r2pipe>=1.9.4",
     "rich>=14.0.0",
     "scikit-learn>=1.6.1",
@@ -17,6 +19,7 @@ dependencies = [
     "tokenizers>=0.21.1",
     "torch>=2.6.0",
     "transformers>=4.51.3",
+    "umap-learn>=0.5.7",
     "wandb>=0.19.9",
 ]
 
