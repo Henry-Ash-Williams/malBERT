@@ -1,100 +1,18 @@
-import wandb
-import torch
 import datasets
-import pandas as pd 
-from transformers.integrations import WandbCallback
+import wandb
 from transformers import DataCollatorForLanguageModeling
-from transformers import Trainer, TrainingArguments, TrainerCallback
+from transformers import Trainer, TrainingArguments
 from transformers import RobertaConfig, PreTrainedTokenizerFast, RobertaForMaskedLM
 
+from utils import handle_sample
 import os 
 import random
 import argparse
-import datetime
 from string import hexdigits 
-from collections import defaultdict
-
 
 # Set up weights & biases 
-os.environ["WANDB_PROJECT"] = "malbert-hf"
-os.environ["WANDB_LOG_MODEL"] = "checkpoint"
-
-# Weights & Biases callback to log evaluation samples
-class LogPredictionsCallback(WandbCallback):
-    def __init__(self, data_collator, token_ids, tokenizer):
-        super().__init__()
-        self.data_collator = data_collator 
-        self.token_ids = token_ids 
-        self.tokenizer = tokenizer
-        
-    def on_train_end(self, args, state, control, **kwargs):
-        X = self.data_collator(torch.tensor(self.token_ids['input_ids']))
-        preds = trainer.predict(X['input_ids'])
-        
-        Y_hat = tokenizer.batch_decode(preds.predictions.argmax(-1))
-        Y = tokenizer.batch_decode(self.token_ids['input_ids'])
-
-        df = pd.DataFrame(data={
-            "Input": tokenizer.batch_decode(X['input_ids']),
-            "Predicted": Y_hat,
-            "Actual": Y,
-        })
-
-        table = self._wandb.Table(dataframe=df)
-        self._wandb.log({"sample": table})
-
-class AbortIfTooSlow(TrainerCallback):
-    def __init__(self, total_steps: int, min_fraction: float = 0.1, max_time_hours: int = 1):
-        self.total_steps = total_steps 
-        self.min_steps = int(total_steps * min_fraction)
-        self.max_time = datetime.timedelta(hours=max_time_hours)
-        self.start_time = None 
-        self._train_time = datetime.timedelta()
-        self._last_step_time = None
-        
-    def on_train_begin(self, args, state, control, **kwargs):
-        self._train_time = datetime.timedelta() 
-        self._last_step_time = datetime.datetime.now() 
-
-    def on_step_begin(self, args, state, control, **kwargs):
-        self._last_step_time = datetime.datetime.now() 
-        
-    def on_step_end(self, args, state, control, **kwargs):
-        now = datetime.datetime.now() 
-
-        if self._last_step_time is not None: 
-            self._train_time += now - self._last_step_time 
-            
-        if self._train_time > self.max_time and state.global_step < self.min_steps: 
-            print(f"‼️ Training too slow: only {state.global_step} out of {self.min_steps}", 
-                  f"after {self._train_time} seconds. Aborting... ")
-
-            raise RuntimeError("Training took too long")
-
-
-def handle_sample(sample):
-    texts = sample['text']
-    labels = sample['label']
-    
-    flattened = defaultdict(list)
-
-    for text, label in zip(texts, labels):
-        tokenized = tokenizer(
-            text,
-            padding='max_length',
-            max_length=args.max_length,
-            return_overflowing_tokens=True,
-            truncation=True
-        )
-
-        for i in range(len(tokenized['input_ids'])):
-            for k in tokenized:
-                flattened[k].append(tokenized[k][i])
-            flattened['label'].append(label)
-
-    return dict(flattened)
-
-        
+os.environ["WANDB_PROJECT"] = "opcode-malberta"
+os.environ["WANDB_LOG_MODEL"] = "end"
 
 def get_args():
     parser = argparse.ArgumentParser(description="Configuration for training/evaluating the model.")
@@ -134,9 +52,15 @@ def get_args():
     parser.add_argument("--dataset_path", type=str,
                         default="/its/home/hw452/programming/MalBERT/data/raw",
                         help="Tokenized dataset path")
-    parser.add_argument("--model_path", type=str,
+    parser.add_argument("--tokenizer_path", type=str,
                         default="/its/home/hw452/programming/MalBERT/MalBERTa",
                         help="Path to tokenizer")
+    parser.add_argument("--output_path", type=str, 
+                        help="Where to save the model",
+                        required=True)
+    parser.add_argument("--dataset_size", type=float, 
+                        help="Portion of the dataset to use",
+                        default=1.0)
 
     args = parser.parse_args()
     args.hidden_size = args.num_attention * args.hidden_size_factor 
@@ -147,12 +71,14 @@ def get_args():
     
     return args 
 
-if __name__ == "__main__":
-    args = get_args()
-    args_dict = vars(args)
-
+def do_pretrain(args):
+    wandb.init(
+        project=os.environ["WANDB_PROJECT"],
+        name=f"malberta-{''.join([random.choice(hexdigits) for _ in range(10)])}",
+        tags=["pretrain"], 
+    )
     train_args = TrainingArguments(
-        output_dir=args.model_path,
+        output_dir=args.output_path,
         overwrite_output_dir=True,
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size, 
@@ -160,43 +86,28 @@ if __name__ == "__main__":
         logging_steps=100,
         save_strategy="epoch",
         report_to="wandb",
-        run_name=f"malbert-{''.join([random.choice(hexdigits) for _ in range(10)])}",
         eval_strategy="epoch",
     )
 
-    print("Configuration:")
-    [print(f"  {k:<30}  {v}") for k, v in args_dict.items()]
-
-    print("Loading tokenizer...", end="")
-    tokenizer = PreTrainedTokenizerFast.from_pretrained(args.model_path)
-    print(" done")
+    tokenizer = PreTrainedTokenizerFast.from_pretrained(args.tokenizer_path)
 
     print("Loading data...", end="")
-    dataset = datasets.load_from_disk("data/raw")
+    dataset = datasets.load_from_disk(args.dataset_path)
+
+    if args.dataset_size < 1.0: 
+        dataset["test"] = dataset["test"].shuffle().select(range(int(len(dataset["test"]) * args.dataset_size)))
+        dataset["train"] = dataset["train"].shuffle().select(range(int(len(dataset["train"]) * args.dataset_size)))
+
     processed_dataset = dataset.map(
         handle_sample,
         remove_columns=dataset['test'].column_names,
         batch_size=64,
         batched=True,
         num_proc=8,
+        fn_kwargs=dict(tokenizer=tokenizer, args=args)
     )
     print(" done.")
     print(f"Dataset has {len(dataset['train'])} samples in train, {len(dataset['test'])} in test")
-
-
-    train_args = TrainingArguments(
-        output_dir=args.model_path,
-        overwrite_output_dir=True,
-        num_train_epochs=args.epochs,
-        per_device_train_batch_size=args.batch_size, 
-        per_device_eval_batch_size=args.batch_size,
-        logging_steps=100,
-        save_strategy="epoch",
-        report_to="wandb",
-        run_name="malbert",
-        eval_strategy="steps",
-        eval_steps=(len(dataset['train']) // args.batch_size) * 5,
-    )
 
     print("Loading model...", end="")
     config = RobertaConfig(
@@ -217,10 +128,8 @@ if __name__ == "__main__":
     print(" done")
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=True, mlm_probability=0.15)
 
-
     train_ds = processed_dataset['train'].remove_columns('label')
     test_ds = processed_dataset['test'].remove_columns('label')
-    pred_data = test_ds.select(range(10))
 
     trainer = Trainer(
         model=model,
@@ -229,11 +138,16 @@ if __name__ == "__main__":
         data_collator=data_collator,
         train_dataset=train_ds, 
         eval_dataset=test_ds,
-        callbacks=[
-            LogPredictionsCallback(data_collator, pred_data, tokenizer),
-            AbortIfTooSlow((len(dataset['train']) // args.batch_size) * args.epochs, min_fraction=0.1, max_time_hours=1)
-        ]
     )
 
     trainer.train()
-    trainer.save_model(args.model_path)
+    trainer.save_model(args.output_path)
+
+if __name__ == "__main__":
+    args = get_args()
+    args_dict = vars(args)
+
+    print("Configuration:")
+    [print(f"  {k:<30}  {v}") for k, v in args_dict.items()]
+
+    do_pretrain(args)

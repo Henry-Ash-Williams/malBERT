@@ -9,6 +9,7 @@ dependencies = [
     "datasets>=3.5.0",
     "evaluate>=0.4.3",
     "matplotlib>=3.10.3",
+    "memory-profiler>=0.61.0",
     "nbformat>=4.2.0",
     "plotly>=6.1.2",
     "r2pipe>=1.9.4",
