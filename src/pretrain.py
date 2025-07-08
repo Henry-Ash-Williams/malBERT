@@ -131,6 +131,8 @@ def do_pretrain(args):
     train_ds = processed_dataset['train'].remove_columns('label')
     test_ds = processed_dataset['test'].remove_columns('label')
 
+    print(model.device)
+
     trainer = Trainer(
         model=model,
         args=train_args, 
@@ -139,6 +141,7 @@ def do_pretrain(args):
         train_dataset=train_ds, 
         eval_dataset=test_ds,
     )
+    print(model.device)
 
     trainer.train()
     trainer.save_model(args.output_path)

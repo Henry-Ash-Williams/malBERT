@@ -55,10 +55,10 @@ def get_args():
 
     # Paths
     parser.add_argument("--dataset_path", type=str,
-                        default="/its/home/hw452/programming/MalBERT/data/raw",
+                        default="/Users/henrywilliams/Documents/programming/python/ai/malbert-test/data/raw",
                         help="Tokenized dataset path")
     parser.add_argument("--tokenizer_path", type=str,
-                        default="/its/home/hw452/programming/MalBERT/MalBERTa",
+                        default="/Users/henrywilliams/Documents/programming/python/ai/malbert-test/MalBERTa",
                         help="Path to tokenizer")
     parser.add_argument("--pretrained_model_path", type=str, 
                         help="Path to a pretrained model")
