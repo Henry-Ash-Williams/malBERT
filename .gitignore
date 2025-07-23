@@ -24,3 +24,7 @@ MalBERTa*/
 artifacts/ 
 
 .vscode/
+
+obfuscation-experiment-results/
+obfuscation-experiment-results-with-ob/
+obfuscation-experiment-results-with-pob/
